@@ -79,16 +79,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--use_unlabeled", type=int, default=1)
 
-    parser.add_argument("--max_epochs", type=int, default=25)
+    parser.add_argument("--max_epochs", type=int, default=100)
     parser.add_argument("--base_lr", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=5e-4)
     parser.add_argument("--ema_decay", type=float, default=0.99)
     parser.add_argument("--seed", type=int, default=2022)
     parser.add_argument("--deterministic", type=int, default=1)
     parser.add_argument("--amp", type=int, default=1)
-    parser.add_argument("--val_interval", type=int, default=200)
+    parser.add_argument("--val_interval", type=int, default=100)
     parser.add_argument("--save_interval", type=int, default=1000)
-    parser.add_argument("--vis_interval", type=int, default=200)
+    parser.add_argument("--vis_interval", type=int, default=100)
     parser.add_argument("--vis_num", type=int, default=2)
 
     parser.add_argument("--dino_pretrained_path", type=str, default="")
@@ -97,9 +97,9 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--lambda_epl", type=float, default=1.0)
     parser.add_argument("--lambda_staf", type=float, default=0.5)
-    parser.add_argument("--lambda_pseudo", type=float, default=1.0)
-    parser.add_argument("--lambda_cons", type=float, default=0.1)
-    parser.add_argument("--lambda_cmnp", type=float, default=0.5)
+    parser.add_argument("--lambda_pseudo", type=float, default=0.5)
+    parser.add_argument("--lambda_cons", type=float, default=0.05)
+    parser.add_argument("--lambda_cmnp", type=float, default=1.0)
 
     parser.add_argument("--pseudo_conf_threshold", type=float, default=0.65)
     parser.add_argument("--pseudo_reliability_threshold", type=float, default=0.35)

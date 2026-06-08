@@ -66,6 +66,8 @@ from EReCu.losses.segmentation_losses import (
     weighted_ce_dice_loss,
 )
 from EReCu.modules.ema import create_ema_model, set_ema_eval, update_ema_model
+from EReCu.modules.mnp_dog_lbp_torch import MNPDogLBPFeatureExtractor
+from EReCu.modules.mnp_roughness_torch import MNPRoughnessFeatureExtractor
 from EReCu.modules.mnp_spsd_torch import MNPSPSDFeatureExtractor
 from EReCu.modules.pef_med import PEFFusion
 from EReCu.modules.pseudo_label import build_evolved_pseudo_label, pseudo_label_stats
@@ -129,16 +131,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--use_unlabeled", type=int, default=1)
 
-    parser.add_argument("--max_epochs", type=int, default=25)
+    parser.add_argument("--max_epochs", type=int, default=100)
     parser.add_argument("--base_lr", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=5e-4)
     parser.add_argument("--ema_decay", type=float, default=0.99)
     parser.add_argument("--seed", type=int, default=2022)
     parser.add_argument("--deterministic", type=int, default=1)
     parser.add_argument("--amp", type=int, default=1)
-    parser.add_argument("--val_interval", type=int, default=200)
+    parser.add_argument("--val_interval", type=int, default=100)
     parser.add_argument("--save_interval", type=int, default=1000)
-    parser.add_argument("--vis_interval", type=int, default=200)
+    parser.add_argument("--vis_interval", type=int, default=100)
     parser.add_argument("--vis_num", type=int, default=2)
 
     parser.add_argument("--dino_pretrained_path", type=str, default="")
@@ -147,8 +149,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--deep_to_shallow_pairs",
         type=str,
-        default="3:7,7:11",
+        default="5:7,7:9,9:11",
         help="Comma-separated zero-based DINO layer pairs, formatted as shallow:deep.",
+    )
+    parser.add_argument(
+        "--mnp_variant",
+        type=str,
+        default="spsd",
+        choices=("spsd", "dog_lbp", "roughness"),
+        help=(
+            "CMNP native features: spsd uses DoG+LBP+SPSD; "
+            "dog_lbp removes SPSD; roughness replaces SPSD with local roughness."
+        ),
+    )
+    parser.add_argument(
+        "--roughness_weight",
+        type=float,
+        default=0.35,
+        help="Scale applied to roughness channels before concatenating them into F_mnp.",
     )
 
     parser.add_argument("--lambda_epl", type=float, default=1.0)
@@ -156,9 +174,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lambda_student_coarse", type=float, default=0.5)
     parser.add_argument("--lambda_teacher_main", type=float, default=0.5)
     parser.add_argument("--lambda_staf", type=float, default=0.5)
-    parser.add_argument("--lambda_pseudo", type=float, default=1.0)
-    parser.add_argument("--lambda_cons", type=float, default=0.1)
-    parser.add_argument("--lambda_cmnp", type=float, default=0.5)
+    parser.add_argument("--lambda_pseudo", type=float, default=0.5)
+    parser.add_argument("--lambda_cons", type=float, default=0.05)
+    parser.add_argument("--lambda_cmnp", type=float, default=1.0)
 
     parser.add_argument("--pseudo_conf_threshold", type=float, default=0.65)
     parser.add_argument("--pseudo_reliability_threshold", type=float, default=0.35)
@@ -168,6 +186,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry_run", action="store_true")
     parser.add_argument("--dry_run_size", type=int, default=32)
     return parser.parse_args()
+
+
+def resolve_mnp_metadata(mnp_variant: str) -> Tuple[int, Tuple[str, ...]]:
+    if mnp_variant == "roughness":
+        return 9, (
+            "LBP",
+            "DoG_abs",
+            "local_std_s1",
+            "local_std_s2",
+            "local_std_s4",
+            "residual_s1",
+            "residual_s2",
+            "residual_s4",
+            "laplacian_abs",
+        )
+    if mnp_variant == "dog_lbp":
+        return 2, ("LBP", "DoG_abs")
+    if mnp_variant == "spsd":
+        return 18, ("LBP", "DoG_abs", "SPSD")
+    raise ValueError(f"Unsupported mnp_variant: {mnp_variant}")
 
 
 def setup_seed(args: argparse.Namespace) -> None:
@@ -375,7 +413,16 @@ def build_models_and_modules(args: argparse.Namespace, device: torch.device):
     ).to(device)
     teacher = create_ema_model(student, device=device)
 
-    mnp_extractor = MNPSPSDFeatureExtractor().to(device)
+    if args.mnp_variant == "roughness":
+        mnp_extractor = MNPRoughnessFeatureExtractor(
+            roughness_weight=args.roughness_weight
+        ).to(device)
+    elif args.mnp_variant == "dog_lbp":
+        mnp_extractor = MNPDogLBPFeatureExtractor().to(device)
+    else:
+        mnp_extractor = MNPSPSDFeatureExtractor().to(device)
+    args.mnp_channels = int(mnp_extractor.out_channels)
+    args.native_features = list(resolve_mnp_metadata(args.mnp_variant)[1])
     cmnp_loss = CMNPLoss(num_classes=args.num_classes, ignore_index=args.ignore_index).to(device)
     pef_fusion = PEFFusion().to(device)
     return student, teacher, mnp_extractor, cmnp_loss, pef_fusion
@@ -586,6 +633,18 @@ def compute_train_step(
         "cmnp_class_quality": cmnp_info["class_quality"].mean().detach(),
         "pef_reliability": pef_info["pixel_reliability"].mean().detach(),
     }
+    class_quality = cmnp_info["class_quality"].detach()
+    for class_idx in range(args.num_classes):
+        metrics[f"cmnp_class_quality_{class_idx}"] = class_quality[:, class_idx].mean()
+    if "class_counts" in stats:
+        total_pixels = torch.tensor(
+            float(pseudo_label.numel()),
+            device=pseudo_label.device,
+            dtype=stats["class_counts"].dtype,
+        ).clamp_min(1.0)
+        for class_idx in range(args.num_classes):
+            metrics[f"pseudo_class_count_{class_idx}"] = stats["class_counts"][class_idx]
+            metrics[f"pseudo_class_ratio_{class_idx}"] = stats["class_counts"][class_idx] / total_pixels
     metrics.update(pair_metrics)
     if return_visuals:
         metrics["visuals"] = {
@@ -912,6 +971,8 @@ def dry_run(args: argparse.Namespace) -> None:
 def main() -> None:
     args = parse_args()
     args.deep_to_shallow_pairs_resolved = parse_deep_to_shallow_pairs(args.deep_to_shallow_pairs)
+    args.mnp_channels, native_features = resolve_mnp_metadata(args.mnp_variant)
+    args.native_features = list(native_features)
     setup_seed(args)
     if args.dry_run:
         dry_run(args)

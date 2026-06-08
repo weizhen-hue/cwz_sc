@@ -9,7 +9,8 @@ dataset protocol/defaults and MNP feature variant. No LPR, ResNet18-MNP, SSN,
 or superpixel module is imported here.
 
 Default setting follows the latest ACDC observation: CMNP uses DoG+LBP without
-SPSD. Set ``--mnp_variant spsd`` to run the full DoG+LBP+SPSD ablation.
+SPSD. Set ``--mnp_variant spsd`` for the full DoG+LBP+SPSD ablation, or
+``--mnp_variant roughness`` to replace SPSD with local multi-scale roughness.
 """
 
 from __future__ import annotations
@@ -31,10 +32,11 @@ if str(CODE_DIR) not in sys.path:
 
 import EReCu.train_erecu_med_scribble_deep2shallow as base
 from EReCu.modules.mnp_dog_lbp_torch import MNPDogLBPFeatureExtractor
+from EReCu.modules.mnp_roughness_torch import MNPRoughnessFeatureExtractor
 from EReCu.modules.mnp_spsd_torch import MNPSPSDFeatureExtractor
 
 
-PROSTATE_CLASS_NAMES = ("BG", "CG", "PZ")
+PROSTATE_CLASS_NAMES = ("BG", "PZ", "CG")
 
 
 def parse_args() -> argparse.Namespace:
@@ -77,8 +79,17 @@ def parse_args() -> argparse.Namespace:
         "--mnp_variant",
         type=str,
         default="dog_lbp",
-        choices=("dog_lbp", "spsd"),
-        help="CMNP native features: dog_lbp removes SPSD; spsd uses DoG+LBP+SPSD.",
+        choices=("dog_lbp", "spsd", "roughness"),
+        help=(
+            "CMNP native features: dog_lbp removes SPSD; spsd uses DoG+LBP+SPSD; "
+            "roughness uses DoG+LBP+multi-scale roughness."
+        ),
+    )
+    parser.add_argument(
+        "--roughness_weight",
+        type=float,
+        default=0.35,
+        help="Scale applied to roughness channels before concatenating them into F_mnp.",
     )
 
     parser.add_argument("--lambda_epl", type=float, default=1.0)
@@ -177,6 +188,22 @@ def build_models_and_modules(args: argparse.Namespace, device: torch.device):
         mnp_extractor = MNPSPSDFeatureExtractor().to(device)
         mnp_channels = mnp_extractor.out_channels
         native_features = ["LBP", "DoG_abs", "SPSD"]
+    elif args.mnp_variant == "roughness":
+        mnp_extractor = MNPRoughnessFeatureExtractor(
+            roughness_weight=args.roughness_weight
+        ).to(device)
+        mnp_channels = mnp_extractor.out_channels
+        native_features = [
+            "LBP",
+            "DoG_abs",
+            "local_std_s1",
+            "local_std_s2",
+            "local_std_s4",
+            "residual_s1",
+            "residual_s2",
+            "residual_s4",
+            "laplacian_abs",
+        ]
     else:
         mnp_extractor = MNPDogLBPFeatureExtractor().to(device)
         mnp_channels = mnp_extractor.out_channels
